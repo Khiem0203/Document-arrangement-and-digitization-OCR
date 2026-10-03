@@ -1,0 +1,28 @@
+[Unit]
+Description=vLLM Service for 5CD-AI/Vintern-1B-v3_5
+After=network.target
+
+[Service]
+User=your_user
+Group=your_group
+WorkingDirectory=/path/to
+Environment="PATH=/path/to/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/path/to/.venv/bin/vllm serve "5CD-AI/Vintern-1B-v3_5" \
+  --trust-remote-code \
+  --max-model-len=2048 \
+  --gpu-memory-utilization 0.8 \
+  --max-num-batched-tokens 4096 \
+  --max-num-seqs 32 \
+  --disable-log-stats \
+  --port 8005
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
+#pip install vllm
+#File located at /etc/systemd/system/vllm.service
+#sudo systemctl start vllm
+#sudo systemctl stop vllm
+#sudo systemctl status vllm

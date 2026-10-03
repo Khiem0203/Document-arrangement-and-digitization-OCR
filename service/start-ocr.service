@@ -1,0 +1,15 @@
+[Unit]
+Description=OCR Celery Service
+After=network.target postgresql.service rabbitmq-server.service
+
+[Service]
+User=your_user
+Group=your_group
+WorkingDirectory=/path/to/OCR_CELERY
+ExecStart=/bin/bash /path/to/OCR_CELERY/start-service.sh
+Environment="PATH=/path/to/anaconda3/envs/ocr/bin:/usr/local/bin:/usr/bin:/bin"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
