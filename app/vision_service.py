@@ -13,10 +13,14 @@ import re
 logger = logging.getLogger(__name__)
 
 # Environment variables with default values
-VLLM_API_URL = os.getenv("VLLM_API_URL", "http://localhost:8005/v1/chat/completions")
+VLLM_API_URL = (
+    os.getenv("VLLM_API_URL")
+    or os.getenv("VISION_MODEL_SERVER")
+    or "http://localhost:8005/v1/chat/completions"
+)
 VLLM_MODEL_NAME = os.getenv(
     "LLM_MODEL",
-    "CD-AI/Vintern-1B-v3_5"
+    "5CD-AI/Vintern-1B-v3_5"
 )
 
 

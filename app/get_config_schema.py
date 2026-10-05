@@ -46,6 +46,12 @@ def extract_code_after_number(text):
         parts[-1] = replace_numbers(parts[-1])
     return "/".join(parts)
 
+_SO_PREFIX_RE = re.compile(r'^\s*S[oóỏõọồôổớơợờởốộ]\s*:?\s*(?=\d)', re.IGNORECASE)
+
+def extract_number_and_code(text):
+    """Số, ký hiệu đầy đủ: bỏ tiền tố "Số"/"Số:" và giữ cả số lẫn ký hiệu ("Số466-QĐ/TU" → "466-QĐ/TU")."""
+    return _SO_PREFIX_RE.sub('', text).strip()
+
 def extract_date_format(text):
     """
     Extract and format date from Vietnamese text.
@@ -225,7 +231,7 @@ def get_fields(CustomerID: int, ConfigTemplateID: int, ocr_json: dict):
             elif field_code in ("KH", "CodeNotation") and field["Value"]:
                 field["Value"] = extract_code_after_number(field["Value"])
             elif field_code == "SKH" and field["Value"]:
-                field["Value"] = extract_code_after_number(field["Value"])
+                field["Value"] = extract_number_and_code(field["Value"])
             elif field_code in ("NKy", "IssuedDate", "NT") and field["Value"]:
                 field["Value"] = extract_date_format(field["Value"])
             elif field_code in ("NKVB", "NK") and field["Value"]:
