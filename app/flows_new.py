@@ -101,7 +101,7 @@ PROMPT_MAPPING = {
     "VV": '<image>\nNhận diện TEXT trong ảnh. Chỉ trả ra TEXT, không trả ra gì thêm. Nếu không có TEXT thì trả về chuỗi rỗng "".',
     "THELOAI": '<image>\nNhận diện TEXT trong ảnh. Chỉ trả ra TEXT, không trả ra gì thêm. Nếu không có TEXT thì trả về chuỗi rỗng "".',
     "SIGNER": '<image>\nNhận diện TEXT trong ảnh. Chỉ trả ra họ và tên người ký văn bản, không trả ra gì thêm.NẾU KHÔNG CÓ THÔNG TIN TÊN NGƯỜI KÝ THÌ TRẢ VỀ CHUỖI RỖNG "".',
-    "NUMBERPAGE": '<image>\nTừ thông tin trong ảnh, hãy trả về số viết tay ở góc trên bên trái của ảnh. Chỉ trả về số, không trả lời gì thêm.',
+    "NUMBERPAGE": '<image>\nExtract handwriting number on image. ONLY RETURN THE NUMBER, NOTHING ELSE. If there is no handwriting number or blank, return empty string "".',
     "DEFAULT": '<image>\nTrích xuất tất cả TEXT trong ảnh, không trả ra gì thêm.'
 }
 
@@ -127,6 +127,20 @@ def clean_text(text):
         text = unicodedata.normalize("NFC", text)
     return text.translate(BANG_XOA_DAU)
 
+
+def _crop_numberpage(image, out_path: str) -> str:
+    """Cắt vùng tờ số viết tay (góc trên bên phải trang 1) và làm rõ nét bút chì mờ.
+
+    Chỉ lấy 20% bên phải để loại phần lớn quốc hiệu in đậm, phóng to 4 lần vì số tờ
+    chỉ cao ~15-20px ở 100 DPI, rồi tăng tương phản (CLAHE) trên ảnh xám.
+    """
+    img_h, img_w = image.shape[:2]
+    crop = image[0:img_h // 12, int(img_w * 0.8):img_w]
+    crop = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4)).apply(gray)
+    cv2.imwrite(out_path, gray)
+    return out_path
 
 
 def _ocr_cropped_image_processing(image_base64, logger):
@@ -275,7 +289,15 @@ def _run_detection_and_ocr(image_paths, logger, request_id: str = "N/A"):
             if signer_crop and "page" in signer_crop:
                 page_num = signer_crop["page"]
         except Exception: pass
-    
+
+    # Trang số (tờ số viết tay trong hồ sơ): góc trên bên phải trang 1
+    image_first = cv2.imread(img_path_1)
+    if image_first is not None:
+        crop_path_number = _crop_numberpage(image_first, os.path.join(temp_folder_base, "numberpage.jpg"))
+        crops_to_ocr.append({"label": "NUMBERPAGE", "crop_path": crop_path_number, "confidence": 1.0})
+    else:
+        logger.warning(f"Could not load first page image for NUMBERPAGE crop: {img_path_1}")
+
     # Perform Concurrent OCR
     async def run_async_ocr():
         async with httpx.AsyncClient() as client:
@@ -306,6 +328,10 @@ def _run_detection_and_ocr(image_paths, logger, request_id: str = "N/A"):
     # Changed: Add confidence scores (use max confidence for each label)
     OCR_RESULTS["_confidences"] = {key: max(scores) * 100 if scores else 0 for key, scores in label_confidences.items()}
     OCR_RESULTS["Page"] = page_num
+    raw_number_page = next((t for c, t in zip(crops_to_ocr, ocr_texts) if c["label"] == "NUMBERPAGE"), None)
+    number_page = OCR_RESULTS.get("NUMBERPAGE", "").strip()
+    OCR_RESULTS["NUMBERPAGE"] = number_page if number_page.isdigit() and int(number_page) != 0 else ""
+    logger.info(f"NUMBERPAGE raw vLLM output: {raw_number_page!r} -> TS: {OCR_RESULTS['NUMBERPAGE']!r}")
 
     # --- Post-process: strip THELOAI prefix khỏi VV (case-insensitive) ---
     if "THELOAI" in OCR_RESULTS:
@@ -593,7 +619,8 @@ def government_flow(context: dict, logger) -> dict:
         "NN": "Tiếng Việt",
         "TLVB": final_ocr.get("THELOAI", ""),
         "Page": final_ocr.get("Page", 1),
-        "SLTr": context.get("pages_number", len(context["image_paths"]))
+        "SLTr": context.get("pages_number", len(context["image_paths"])),
+        "TS": final_ocr.get("NUMBERPAGE", ""),
     }
     logger.info(f"Government Flow: Mapped JSON data before keywords: {json_data}")
 

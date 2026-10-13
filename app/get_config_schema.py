@@ -46,11 +46,15 @@ def extract_code_after_number(text):
         parts[-1] = replace_numbers(parts[-1])
     return "/".join(parts)
 
-_SO_PREFIX_RE = re.compile(r'^\s*S[oóỏõọồôổớơợờởốộ]\s*:?\s*(?=\d)', re.IGNORECASE)
+# "Số" / "Số:" (kể cả khi OCR mất chữ S: "ố:") đứng trước số hoặc dấu "/" (văn bản chưa điền số)
+_SO_PREFIX_RE = re.compile(r'^\s*S?[oóỏõọồôổớơợờởốộ]\s*:?\s*(?=[\d/])', re.IGNORECASE)
+# OCR làm mất "/" giữa số và ký hiệu: "743MTTQ-BTT" → "743/MTTQ-BTT"
+_MISSING_SLASH_RE = re.compile(r'^(\d+)(?=[A-ZĐ]{2,})')
 
 def extract_number_and_code(text):
-    """Số, ký hiệu đầy đủ: bỏ tiền tố "Số"/"Số:" và giữ cả số lẫn ký hiệu ("Số466-QĐ/TU" → "466-QĐ/TU")."""
-    return _SO_PREFIX_RE.sub('', text).strip()
+    """Số, ký hiệu đầy đủ: bỏ tiền tố "Số", giữ cả số lẫn ký hiệu ("Số466-QĐ/TU" → "466-QĐ/TU")."""
+    value = _SO_PREFIX_RE.sub('', text).strip()
+    return _MISSING_SLASH_RE.sub(r'\1/', value)
 
 def extract_date_format(text):
     """
@@ -155,7 +159,6 @@ _TEMPLATE_CODE_MAP = {
     "TG":   "CQBH",     # Tác giả = Cơ quan ban hành
     "BG":   "LB",       # Bản gốc/Bản chính (xét giá trị LB)
     "BS":   "LB",       # Bản sao (xét giá trị LB)
-    "TS":   "SLTr",     # Trang số
     "GC":   "GHICHU",   # Ghi chú
     "NKVB": "NK",       # Người ký văn bản
     # TLVTY: đặc biệt — ghép TLVB + TTNDVB (xử lý riêng bên dưới)

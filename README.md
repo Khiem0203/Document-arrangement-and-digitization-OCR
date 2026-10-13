@@ -33,7 +33,7 @@ The system automates metadata extraction for documents being archived and digiti
 - Document type and summary (Tên loại và trích yếu)
 - Signer (Người ký)
 - Original or copy status (Bản gốc / Bản sao), determined from the ink color of the signature
-- Confidentiality level (Độ mật) and page count
+- Confidentiality level (Độ mật), page count, and the handwritten sheet number of the document within its dossier (Trang số)
 
 The output fields are not fixed. They are driven by configuration templates stored in the business database (`sampleconfigdocuments`), so each customer can define its own field set, ordering and export rules without code changes.
 
