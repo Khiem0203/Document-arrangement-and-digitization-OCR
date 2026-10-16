@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 ENABLE_CAPITALIZATION_RULES = os.getenv("ENABLE_CAPITALIZATION_RULES", "true").strip().lower() in ("1", "true", "yes")
 ENABLE_SPELL_FIX = os.getenv("ENABLE_SPELL_FIX", "true").strip().lower() in ("1", "true", "yes")
+# Sửa chính tả bằng model ProtonX (dịch vụ app/spellfix_api.py), chạy trước các quy tắc sửa hiện có
+ENABLE_ML_SPELL_FIX = os.getenv("ENABLE_ML_SPELL_FIX", "true").strip().lower() in ("1", "true", "yes")
+SPELLFIX_API_URL = os.getenv("SPELLFIX_API_URL", "http://localhost:8006/spellfix/correct")
+SPELLFIX_TIMEOUT = float(os.getenv("SPELLFIX_TIMEOUT", "60"))
+SPELLFIX_LABELS = {l.strip().upper() for l in os.getenv("SPELLFIX_LABELS", "ORG,VV,THELOAI,SENDTO").split(",") if l.strip()}
 
 import unicodedata
 def clean_text(text):
@@ -446,6 +451,56 @@ def _load_spell_dict() -> list:
     _spell_cache = entries
     _spell_mtime = mtime
     return entries
+
+
+# Trạng thái ProtonX của tiến trình hiện tại: None = chưa kiểm tra, True/False = đã chốt.
+# Kiểm tra một lần lúc khởi động (check_spellfix); đã False thì mọi request đi thẳng luồng quy tắc,
+# không kiểm tra lại. Muốn bật lại sau khi dịch vụ chạy trở lại: khởi động lại worker / API.
+_spellfix_available = None
+
+
+def spellfix_health_url() -> str:
+    from urllib.parse import urlparse
+    p = urlparse(SPELLFIX_API_URL)
+    return os.getenv("SPELLFIX_HEALTH_URL", f"{p.scheme}://{p.netloc}/health")
+
+
+def check_spellfix(force: bool = False) -> bool:
+    """Kiểm tra dịch vụ ProtonX một lần và ghi nhớ kết quả cho tiến trình này."""
+    global _spellfix_available
+    if not ENABLE_ML_SPELL_FIX:
+        _spellfix_available = False
+        return False
+    if _spellfix_available is not None and not force:
+        return _spellfix_available
+    url = spellfix_health_url()
+    try:
+        response = requests.get(url, timeout=float(os.getenv("SPELLFIX_HEALTH_TIMEOUT", "3")))
+        response.raise_for_status()
+        _spellfix_available = True
+        logger.info(f"ProtonX spellfix [OK] {url} -> flow: OCR -> ProtonX -> rules")
+    except Exception as e:
+        _spellfix_available = False
+        logger.warning(f"ProtonX spellfix [FAIL] {url} ({e}) -> ProtonX bypassed, flow: OCR -> rules")
+    return _spellfix_available
+
+
+def ml_spell_fix(texts: list) -> list:
+    """Gửi danh sách text tới dịch vụ ProtonX; dịch vụ không chạy hoặc lỗi thì trả nguyên văn bản."""
+    global _spellfix_available
+    if not texts or not check_spellfix():
+        return texts
+    try:
+        response = requests.post(SPELLFIX_API_URL, json={"texts": texts}, timeout=SPELLFIX_TIMEOUT)
+        response.raise_for_status()
+        fixed = response.json().get("texts", [])
+        if len(fixed) != len(texts):
+            raise ValueError(f"expected {len(texts)} texts, got {len(fixed)}")
+        return fixed
+    except Exception as e:
+        _spellfix_available = False
+        logger.error(f"ProtonX spellfix failed ({e}) -> ProtonX bypassed for this process until restart, using rules only")
+        return texts
 
 
 def fix_spelling(text: str) -> str:

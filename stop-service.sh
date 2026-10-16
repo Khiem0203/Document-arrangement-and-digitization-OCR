@@ -45,6 +45,15 @@ else
     echo "    Detectron2 Phieutin service not found."
 fi
 
+# --- Stop the ProtonX Spellfix Microservice ---
+echo "--> Sending TERM signal to Spellfix service..."
+pkill -f "uvicorn app.spellfix_api:app"
+if [ $? -eq 0 ]; then
+    echo "    Signal sent."
+else
+    echo "    Spellfix service not found."
+fi
+
 
 echo ""
 echo "----------------------------------------"

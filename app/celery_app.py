@@ -1,5 +1,5 @@
 from celery import Celery
-from celery.signals import worker_ready
+from celery.signals import worker_ready, worker_process_init
 from kombu import Exchange, Queue
 import os
 import logging
@@ -55,7 +55,48 @@ def _check_connections(sender, **kwargs):
     except Exception as e:
         _startup_log(f"  [FAIL] PostgreSQL  {pg_host}:{pg_port}/{pg_db}  →  {e}")
 
+    # --- Model services ---
+    import requests
+
+    def _base(url: str) -> str:
+        u = urlparse(url)
+        return f"{u.scheme}://{u.netloc}"
+
+    vllm = os.getenv("VLLM_API_URL", "http://localhost:8005/v1/chat/completions")
+    det = os.getenv("DETECTRON2_API_URL", "http://localhost:8003/detectron2/detect")
+    det_pt = os.getenv("DETECTRON2_PHIEUTIN_API", "http://localhost:8010/detectron2_phieutin/detect")
+    checks = [
+        ("vLLM", f"{_base(vllm)}/health"),
+        ("Detectron2", f"{_base(det)}/docs"),
+        ("Detectron2 PT", f"{_base(det_pt)}/docs"),
+    ]
+    for name, url in checks:
+        try:
+            requests.get(url, timeout=3).raise_for_status()
+            _startup_log(f"  [OK]   {name:<12} {url}")
+        except Exception as e:
+            _startup_log(f"  [FAIL] {name:<12} {url}  →  {e}")
+
+    from .utils import ENABLE_ML_SPELL_FIX, spellfix_health_url
+    if not ENABLE_ML_SPELL_FIX:
+        _startup_log("  [SKIP] ProtonX       ENABLE_ML_SPELL_FIX=false  →  flow: OCR → quy tắc")
+    else:
+        url = spellfix_health_url()
+        try:
+            requests.get(url, timeout=3).raise_for_status()
+            _startup_log(f"  [OK]   ProtonX      {url}  →  flow: OCR → ProtonX → quy tắc")
+        except Exception as e:
+            _startup_log(f"  [FAIL] ProtonX      {url}  →  {e}")
+            _startup_log("         ProtonX bị bỏ qua cho tới khi khởi động lại worker  →  flow: OCR → quy tắc")
+
     _startup_log("=" * 60)
+
+
+@worker_process_init.connect
+def _init_spellfix_state(**kwargs):
+    """Mỗi tiến trình con kiểm tra ProtonX một lần; request sau dùng lại kết quả, không kiểm tra lại."""
+    from .utils import check_spellfix
+    check_spellfix(force=True)
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND")

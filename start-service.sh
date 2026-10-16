@@ -63,7 +63,7 @@ PG_PORT="${PG_PORT:-5432}"
 #  APPLICATION STARTUP
 # ==============================================================================
 LOG_DIR="$PROJECT_DIR/logs"
-mkdir -p "$LOG_DIR/api" "$LOG_DIR/chinhly" "$LOG_DIR/phieutin" "$LOG_DIR/process" "$LOG_DIR/db"
+mkdir -p "$LOG_DIR/api" "$LOG_DIR/chinhly" "$LOG_DIR/phieutin" "$LOG_DIR/process" "$LOG_DIR/db" "$LOG_DIR/spellfix"
 
 # Activate conda
 if [ -f "$(dirname "$CONDA_PATH")/../etc/profile.d/conda.sh" ]; then
@@ -109,6 +109,13 @@ start_detectron2_service() {
     local log_file="$LOG_DIR/chinhly/detectron2_service_$(date +%Y%m%d_%H%M%S).log"
     echo "Starting Detectron2 Microservice on port 8003..."
     nohup "$UVICORN" app.detectron2_api:app --host 0.0.0.0 --port 8003 > "$log_file" 2>&1 &
+    echo "  PID: $!  Log: $log_file"
+}
+
+start_spellfix_service() {
+    local log_file="$LOG_DIR/spellfix/spellfix_service_$(date +%Y%m%d_%H%M%S).log"
+    echo "Starting ProtonX Spellfix Microservice on port 8006..."
+    nohup "$UVICORN" app.spellfix_api:app --host 0.0.0.0 --port 8006 > "$log_file" 2>&1 &
     echo "  PID: $!  Log: $log_file"
 }
 
@@ -161,7 +168,26 @@ echo "========================================"
 
 start_detectron2_service
 start_detectron2_phieutin_service
+start_spellfix_service
 sleep 3
+
+# Chờ ProtonX nạp xong model trước khi khởi động API/worker: worker chỉ kiểm tra ProtonX một lần
+# lúc khởi động, nếu lúc đó chưa sẵn sàng thì ProtonX bị bỏ qua tới lần khởi động lại sau.
+if [ "${ENABLE_ML_SPELL_FIX:-true}" = "true" ]; then
+    _SPELLFIX_BASE=$(echo "${SPELLFIX_API_URL:-http://localhost:8006/spellfix/correct}" | sed -E 's#^(https?://[^/]+).*#\1#')
+    _SPELLFIX_WAIT=${SPELLFIX_WAIT_SECONDS:-120}
+    echo "Waiting for ProtonX spellfix at $_SPELLFIX_BASE/health (max ${_SPELLFIX_WAIT}s) ..."
+    _waited=0
+    until curl -sf "$_SPELLFIX_BASE/health" > /dev/null 2>&1; do
+        if [ "$_waited" -ge "$_SPELLFIX_WAIT" ]; then
+            echo "Warning: ProtonX not ready after ${_SPELLFIX_WAIT}s -> workers will bypass ProtonX (flow: OCR -> rules)."
+            break
+        fi
+        sleep 5
+        _waited=$((_waited + 5))
+    done
+    [ "$_waited" -lt "$_SPELLFIX_WAIT" ] && echo "ProtonX spellfix is ready."
+fi
 
 start_fastapi_server
 sleep 3

@@ -59,6 +59,7 @@ Main characteristics:
 | Layout detection | Detectron2 (Faster R-CNN R50-FPN), PyTorch 2.5, CUDA | Detection of document regions (number, date, organization, signer, etc.) |
 | Text recognition | Vintern-1B-v3.5 (`5CD-AI/Vintern-1B-v3_5`) served by vLLM | Vietnamese vision-language model for reading cropped regions |
 | Image processing | OpenCV, Pillow, pdf2image (Poppler), PyMuPDF | PDF rasterization, deskewing, cropping, ink color detection |
+| Model-based spelling correction | ProtonX Legal Text Correction (`protonx-models/protonx-legal-tc`, T5 seq2seq) served by Hugging Face Transformers | Corrects OCR errors in recognized text before the rule-based normalization |
 | Text normalization | Custom rules, openpyxl, national administrative unit catalog (2021) | Spelling, abbreviation, capitalization and place-name correction |
 | Monitoring | Flower (optional) | Worker inspection and the worker management API |
 | Deployment | Bash scripts, systemd units, Docker Compose | Process orchestration on a Linux GPU host |
@@ -84,6 +85,9 @@ Main characteristics:
    rasterize,       Detectron2 :8003      callback_url        ocr_results
    deskew, route    read regions    --->
                     vLLM :8005
+                    correct text
+                    ProtonX :8006
+                    apply rules
 
    Record slip pipeline:
    phieutin_prepare_queue  ->  phieutin_process_queue  ->  phieutin_db_queue
@@ -95,6 +99,7 @@ Main characteristics:
 | FastAPI application | 9090 | `start-service.sh` |
 | Detectron2 detection service (main documents) | 8003 | `start-service.sh` |
 | Detectron2 detection service (record slips) | 8010 | `start-service.sh` |
+| ProtonX spelling correction service | 8006 | `start-service.sh` |
 | vLLM server (Vintern-1B-v3.5) | 8005 | `service/vllm.service` |
 | RabbitMQ (AMQP / management UI) | 5672 / 15672 | `docker-compose.yaml` |
 | PostgreSQL (result backend) | 5432 | `docker-compose.yaml` |
@@ -181,13 +186,14 @@ Every PDF under `s3_bucket/s3_prefix` is listed and processed in parallel, one t
 2. **Signer search.** Header fields are taken from page 1. For documents longer than 10 pages, the signature block is searched in parallel from the beginning and the end of the document.
 3. **Original or copy classification.** The ink color of the signature crop is analyzed in HSV space. Red or blue ink indicates an original, black ink indicates a copy.
 4. **Text recognition.** Each region crop is sent concurrently to the vLLM server with a prompt specific to its label.
-5. **Normalization.**
+5. **Model-based correction (ProtonX).** The recognized text of the labels listed in `SPELLFIX_LABELS` (default `ORG`, `VV`, `THELOAI`, `SENDTO`) is sent in a single batch to the ProtonX service, which restores diacritics and fixes OCR spelling errors. Numbers, dates and signer names are not sent. Texts longer than the model limit (about 160 tokens) are split by sentence and corrected piece by piece. A corrected piece whose length differs by more than 20% from the original is discarded, to guard against the model adding or dropping content. If the service is unavailable, this step is skipped (see [Feature switches](#feature-switches)).
+6. **Rule-based normalization.** Applied to the output of the previous step:
    - Spelling correction from `spell_dict.xlsx`.
    - Place-name correction after administrative unit keywords (`tỉnh`, `huyện`, `xã`, `phường`, etc.), matched against `dvhc_2021.json`. This corrects OCR errors in tone marks, vowel diacritics and `d`/`đ`. Ambiguous names are resolved with the province and district found in the same text.
    - Abbreviation normalization: `Ủy ban nhân dân` becomes `UBND`, `Hội đồng nhân dân` becomes `HĐND`, `về việc` becomes `v/v`.
    - Capitalization rules for issuing authorities and document types.
    - Separation of the document type from the summary.
-6. **Field mapping.** The extracted values are mapped to the template fields (for example `SKH`, `NT`, `TG`, `TLVTY`, `NKVB`), with per-field confidence scores and date and number formatting. For example, `SKH` keeps both the number and the notation (`Số466-QĐ/TU` becomes `466-QĐ/TU`), while the older `SVB` and `KH` codes receive them separately.
+7. **Field mapping.** The extracted values are mapped to the template fields (for example `SKH`, `NT`, `TG`, `TLVTY`, `NKVB`), with per-field confidence scores and date and number formatting. For example, `SKH` keeps both the number and the notation (`Số466-QĐ/TU` becomes `466-QĐ/TU`), while the older `SVB` and `KH` codes receive them separately.
 
 ### Stage 3: Result delivery (`webhook_queue`)
 
@@ -207,6 +213,9 @@ The request, raw text and final JSON are upserted into the `ocr_results` table o
 |---|---|---|
 | `ENABLE_SPELL_FIX` | `true` | Enables dictionary spelling correction and place-name correction. |
 | `ENABLE_CAPITALIZATION_RULES` | `true` | Enables capitalization rules. When disabled, spelling correction keeps the original letter case of the text. |
+| `ENABLE_ML_SPELL_FIX` | `true` | Enables the ProtonX model-based correction step. When disabled, the flow is OCR followed directly by the rule-based normalization. |
+
+**ProtonX availability.** Each worker process and the API process check the ProtonX service (`/health`) once, at startup, and record the result in `logs/startup_connections.log`. If the service is not reachable, ProtonX is bypassed for that process and every request goes directly from OCR to the rule-based normalization, without checking the service again. If a call to ProtonX fails later, ProtonX is bypassed from that point on in the same way. To use ProtonX again after it has been bypassed, restart the workers and the API.
 
 ---
 
@@ -287,6 +296,7 @@ The job state can also be queried at any time with `GET /api/request-status/{req
 |   |-- flow_phieutin.py            Record slip flow
 |   |-- detectron2_api.py           Detection service for documents (port 8003)
 |   |-- detectron2_phieutin_api.py  Detection service for record slips (port 8010)
+|   |-- spellfix_api.py             ProtonX spelling correction service (port 8006)
 |   |-- vision_service.py           vLLM client
 |   |-- get_config_schema.py        Template loading and field mapping
 |   |-- utils.py                    S3, PDF, image utilities and text normalization
@@ -395,6 +405,12 @@ This is the primary configuration file. `start-service.sh` loads it from `PROJEC
 | `DETECTRON2_PHIEUTIN_API` | `http://localhost:8010/detectron2_phieutin/detect` | Change only if the detection service runs on another host |
 | `VISION_MODEL_SERVER` | `http://localhost:8005/v1/chat/completions` | vLLM chat completions endpoint. Change only if vLLM runs on another host or port. |
 | `ENABLE_SPELL_FIX` / `ENABLE_CAPITALIZATION_RULES` | `true` | Feature switches, see [Feature switches](#feature-switches) |
+| `ENABLE_ML_SPELL_FIX` | `true` | Enables the ProtonX correction step, see [Feature switches](#feature-switches) |
+| `SPELLFIX_API_URL` | `http://localhost:8006/spellfix/correct` | ProtonX service endpoint. The health check uses `/health` on the same host and port. |
+| `SPELLFIX_LABELS` | `ORG,VV,THELOAI,SENDTO` | OCR labels whose text is sent to ProtonX |
+| `SPELLFIX_MODEL` | `protonx-models/protonx-legal-tc` | Hugging Face model ID, or a local directory if the server has no Internet access |
+| `SPELLFIX_NUM_BEAMS` / `SPELLFIX_DTYPE` | `4` / `float32` | Beam search width and model precision (`float32`, `float16`, `bfloat16`) |
+| `SPELLFIX_WAIT_SECONDS` | `120` | Maximum time `start-service.sh` waits for ProtonX before starting the API and workers |
 
 Optional variables that the code reads but `.env` does not define:
 
@@ -474,7 +490,7 @@ docker compose up -d
 bash start-service.sh
 ```
 
-`start-service.sh` loads `.env` and waits for PostgreSQL to become available. It then starts the FastAPI application (port 9090), both Detectron2 services (ports 8003 and 8010), and the workers for all seven queues. Logs are written to `logs/` and grouped by component.
+`start-service.sh` loads `.env` and waits for PostgreSQL to become available. It then starts both Detectron2 services (ports 8003 and 8010) and the ProtonX service (port 8006), waits up to `SPELLFIX_WAIT_SECONDS` for ProtonX to finish loading its model, and starts the FastAPI application (port 9090) and the workers for all seven queues. The first start downloads the ProtonX model (about 908 MB) from Hugging Face, which can take longer than the wait time. Logs are written to `logs/` and grouped by component.
 
 ### Running as systemd services
 
@@ -553,7 +569,7 @@ Interactive API documentation is available at `http://localhost:9090/docs`.
 
 ## Operations and Monitoring
 
-- **Logs.** Logs are written to `logs/` with subfolders per component (`api`, `process`, `chinhly`, `phieutin`, `db`). The infrastructure connection check performed at worker startup is recorded in `logs/startup_connections.log`.
+- **Logs.** Logs are written to `logs/` with subfolders per component (`api`, `process`, `chinhly`, `phieutin`, `db`, `spellfix`). The connection check performed at worker startup (PostgreSQL, vLLM, both Detectron2 services and ProtonX) is recorded in `logs/startup_connections.log`. Each text changed by ProtonX is logged by the process workers as `ML spell fix [LABEL]: 'before' -> 'after'`.
 - **Queues.** The RabbitMQ management UI is available at `http://<host>:15672`.
 - **Workers.** Flower provides worker inspection and is required for the `/api/workers/*` endpoints:
 
@@ -572,4 +588,6 @@ Interactive API documentation is available at `http://localhost:9090/docs`.
 - **PDF only.** Only PDF input is accepted. Other content types are rejected during preparation.
 - **Spelling correction only touches words in the dictionary.** Place-name correction only applies after an administrative unit keyword, and only to names of two or more syllables. Names absent from the 2021 catalog, such as units created by later mergers, are not corrected.
 - **`confidence_score` is not computed from the model.** The document-level `confidence_score` in the webhook payload is a randomly generated placeholder. Per-field `Percent` values come from the detection model.
-- **GPU sharing.** Detectron2 and vLLM share the GPU. Increasing `GPU_CONCURRENCY` or the number of `process_queue` workers requires enough GPU memory.
+- **GPU sharing.** Detectron2, vLLM and ProtonX (about 1 GB in `float32`) share the GPU. Increasing `GPU_CONCURRENCY` or the number of `process_queue` workers requires enough GPU memory.
+- **ProtonX cannot be served by vLLM.** The model is a T5 encoder-decoder (`T5ForConditionalGeneration`), which vLLM does not support, so it runs in its own Hugging Face Transformers service.
+- **ProtonX is not re-enabled automatically.** Once a process has bypassed ProtonX, it stays bypassed until the workers and the API are restarted.

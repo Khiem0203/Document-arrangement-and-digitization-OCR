@@ -9,7 +9,7 @@ import asyncio
 import httpx
 from celery.utils.log import get_task_logger
 celery_logger = get_task_logger(__name__)
-from .utils import convertPDFImage, variants, process_text, is_box_in_top_left, normalize_abbrevs, capitalize_after_admin_units, chuan_hoa_tac_gia, sentence_case, fix_spelling, fix_place_names
+from .utils import convertPDFImage, variants, process_text, is_box_in_top_left, normalize_abbrevs, capitalize_after_admin_units, chuan_hoa_tac_gia, sentence_case, fix_spelling, fix_place_names, ml_spell_fix, SPELLFIX_LABELS
 from .vision_service import call_vllm, call_vllm_async, call_vllm_base64, encode_image_to_base64_resize
 from .get_config_schema import get_fields, extract_date_format, get_fields_by_name
 from .detect_color import detect_colors_in_image
@@ -143,6 +143,20 @@ def _crop_numberpage(image, out_path: str) -> str:
     return out_path
 
 
+def _apply_ml_spell_fix(crops, texts, logger):
+    """Bước ProtonX: sửa text OCR của các nhãn trong SPELLFIX_LABELS trước khi áp quy tắc sửa hiện có."""
+    idx = [i for i, (c, t) in enumerate(zip(crops, texts)) if t and c["label"] in SPELLFIX_LABELS]
+    if not idx:
+        return texts
+    fixed = ml_spell_fix([texts[i] for i in idx])
+    out = list(texts)
+    for i, new in zip(idx, fixed):
+        if new and new != out[i]:
+            logger.info(f"ML spell fix [{crops[i]['label']}]: {out[i]!r} -> {new!r}")
+            out[i] = new
+    return out
+
+
 def _ocr_cropped_image_processing(image_base64, logger):
     """
     A helper function to process cropped images for OCR.
@@ -155,6 +169,7 @@ def _ocr_cropped_image_processing(image_base64, logger):
         result = ""
     if result:
         result = ' '.join(result.split('\n')).strip()
+        result = ml_spell_fix([result])[0]
         result = capitalize_after_admin_units(normalize_abbrevs(fix_spelling(sentence_case(result))))
     return result
 
@@ -304,6 +319,7 @@ def _run_detection_and_ocr(image_paths, logger, request_id: str = "N/A"):
             tasks = [call_vllm_async(client, PROMPT_MAPPING.get(c["label"], "DEFAULT"), c["crop_path"]) for c in crops_to_ocr]
             return await asyncio.gather(*tasks)
     ocr_texts = asyncio.run(run_async_ocr())
+    ocr_texts = _apply_ml_spell_fix(crops_to_ocr, ocr_texts, logger)
 
     # Aggregate results
     final_ocr = defaultdict(list)
@@ -506,6 +522,7 @@ def _run_detection_and_ocr_chinhly(image_paths, logger, request_id: str = "N/A")
             return await asyncio.gather(*tasks)
     ocr_texts = asyncio.run(run_async_ocr())
     celery_logger.info(f"Kết quả OCR trước xử lý: {ocr_texts}")
+    ocr_texts = _apply_ml_spell_fix(crops_to_ocr, ocr_texts, logger)
     final_ocr = defaultdict(list)
     label_confidences = defaultdict(list)  # Changed: track confidences for each label
 

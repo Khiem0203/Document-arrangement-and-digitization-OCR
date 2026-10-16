@@ -90,6 +90,13 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def _init_spellfix_state():
+    """/api/crop-ocr chạy trong tiến trình API: kiểm tra ProtonX một lần lúc khởi động."""
+    from .utils import check_spellfix
+    check_spellfix(force=True)
+
+
 @app.post("/api/create_profile_name", response_model=ProfileResponse,status_code=200)
 async def create_profile_name(request: ProfileRequest):
     """
